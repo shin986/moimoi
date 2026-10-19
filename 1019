@@ -1,0 +1,600 @@
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <Update.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+
+// ================================
+// Wi-Fi 設定
+// ================================
+const char* host = "esp32";
+const char* ssid = "labor";
+const char* password = "98668800";
+
+// ================================
+// GitHub 版本設定
+// ================================
+
+// 目前 ESP32 韌體版本
+const char* currentVersion = "0.0.2";
+
+// GitHub Pages 版本檔案網址
+const char* versionURL =
+  "https://shin986.github.io/moimoi/version.txt";
+
+// 每 10 分鐘檢查一次
+const unsigned long versionCheckInterval = 600000UL;
+
+unsigned long lastVersionCheck = 0;
+
+String latestVersion = "尚未取得";
+String versionStatus = "尚未檢查";
+
+// ================================
+// Web Server
+// ================================
+WebServer server(80);
+
+// ================================
+// 登入頁面
+// ================================
+const char* loginIndex = R"rawliteral(
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 登入</title>
+
+<style>
+body {
+  font-family: Arial, "Microsoft JhengHei", sans-serif;
+  background: #eef3f8;
+  text-align: center;
+  padding: 30px 15px;
+}
+.box {
+  background: white;
+  max-width: 400px;
+  margin: auto;
+  padding: 25px;
+  border-radius: 18px;
+  box-shadow: 0 4px 15px #0002;
+}
+h1 { font-size: 30px; }
+input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 13px;
+  margin: 10px 0;
+  font-size: 18px;
+}
+button {
+  width: 100%;
+  padding: 14px;
+  font-size: 22px;
+  color: white;
+  background: #1976d2;
+  border: none;
+  border-radius: 10px;
+}
+</style>
+</head>
+
+<body>
+<div class="box">
+  <h1>🔐 ESP32 管理登入</h1>
+
+  <form id="loginForm">
+    <input type="text" id="userid"
+      placeholder="請輸入帳號" required>
+
+    <input type="password" id="pwd"
+      placeholder="請輸入密碼" required>
+
+    <button type="submit">登入系統</button>
+  </form>
+</div>
+
+<script>
+document.getElementById("loginForm").addEventListener(
+  "submit", function(e) {
+    e.preventDefault();
+
+    if (
+      document.getElementById("userid").value === "shin" &&
+      document.getElementById("pwd").value === "1219"
+    ) {
+      window.location.href = "/serverIndex";
+    } else {
+      alert("帳號或密碼錯誤！");
+    }
+  }
+);
+</script>
+</body>
+</html>
+)rawliteral";
+
+// ================================
+// OTA 更新與版本管理頁面
+// ================================
+const char* serverIndex = R"rawliteral(
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 韌體管理</title>
+
+<style>
+body {
+  font-family: Arial, "Microsoft JhengHei", sans-serif;
+  background: #eef3f8;
+  margin: 0;
+  padding: 20px;
+  color: #263238;
+}
+.box {
+  background: white;
+  max-width: 600px;
+  margin: 15px auto;
+  padding: 22px;
+  border-radius: 16px;
+  box-shadow: 0 4px 15px #0002;
+}
+h1 {
+  text-align: center;
+  font-size: 30px;
+}
+h2 {
+  font-size: 24px;
+  border-bottom: 2px solid #ddd;
+  padding-bottom: 10px;
+}
+p {
+  font-size: 19px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+button {
+  width: 100%;
+  padding: 15px;
+  margin-top: 12px;
+  font-size: 21px;
+  font-weight: bold;
+  color: white;
+  background: #1976d2;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.updateBtn { background: #00897b; }
+input[type=file] {
+  width: 100%;
+  font-size: 17px;
+  margin: 15px 0;
+}
+#prg {
+  font-size: 20px;
+  margin-top: 15px;
+  font-weight: bold;
+}
+.status {
+  padding: 12px;
+  background: #f1f5f9;
+  border-radius: 8px;
+}
+a { overflow-wrap: anywhere; }
+</style>
+</head>
+
+<body>
+
+<h1>⚙️ ESP32 韌體管理</h1>
+
+<div class="box">
+  <h2>📡 版本檢查</h2>
+
+  <p>目前韌體版本：
+    <strong id="currentVersion">讀取中...</strong>
+  </p>
+
+  <p>GitHub 最新版本：
+    <strong id="latestVersion">讀取中...</strong>
+  </p>
+
+  <p class="status" id="versionStatus">
+    正在檢查 GitHub...
+  </p>
+
+  <button type="button" onclick="checkVersion()">
+    🔄 立即檢查更新
+  </button>
+
+  <p>
+    GitHub 專案：
+    <a href="https://shin986.github.io/moimoi/"
+       target="_blank" rel="noopener">
+      開啟 GitHub 網站
+    </a>
+  </p>
+</div>
+
+<div class="box">
+  <h2>📦 手動更新韌體</h2>
+
+  <form id="upload_form">
+    <input type="file" name="update"
+      accept=".bin" required>
+
+    <button class="updateBtn" type="submit">
+      ⬆️ 上傳並更新韌體
+    </button>
+  </form>
+
+  <p id="prg">上傳進度：0%</p>
+</div>
+
+<script>
+function loadVersion() {
+  fetch('/version', {cache: 'no-store'})
+    .then(r => {
+      if (!r.ok) throw new Error('讀取失敗');
+      return r.json();
+    })
+    .then(data => {
+      document.getElementById('currentVersion').textContent =
+        data.current;
+
+      document.getElementById('latestVersion').textContent =
+        data.latest;
+
+      document.getElementById('versionStatus').textContent =
+        data.status;
+    })
+    .catch(() => {
+      document.getElementById('versionStatus').textContent =
+        '無法讀取版本資料';
+    });
+}
+
+function checkVersion() {
+  const status = document.getElementById('versionStatus');
+  status.textContent = '正在連線至 GitHub，請稍候...';
+
+  fetch('/checkVersion', {cache: 'no-store'})
+    .then(r => r.text())
+    .then(message => {
+      status.textContent = message;
+      loadVersion();
+    })
+    .catch(() => {
+      status.textContent = '檢查失敗，請確認 ESP32 網路連線';
+    });
+}
+
+// 開啟頁面時自動顯示版本資訊
+loadVersion();
+
+// 每 10 分鐘更新一次頁面顯示
+setInterval(loadVersion, 600000);
+
+// OTA 韌體上傳
+document.getElementById('upload_form').addEventListener(
+  'submit', function(e) {
+    e.preventDefault();
+
+    const fileInput = this.querySelector('input[type=file]');
+    const file = fileInput.files[0];
+
+    if (!file) {
+      alert('請先選擇 .bin 韌體檔案');
+      return;
+    }
+
+    if (!file.name.toLowerCase().endsWith('.bin')) {
+      alert('請選擇副檔名為 .bin 的韌體檔案');
+      return;
+    }
+
+    if (!confirm('確定要更新 ESP32 韌體嗎？')) {
+      return;
+    }
+
+    const data = new FormData();
+    data.append('update', file);
+
+    const xhr = new XMLHttpRequest();
+
+    xhr.open('POST', '/update', true);
+
+    xhr.upload.addEventListener('progress', function(evt) {
+      if (evt.lengthComputable) {
+        const percent = Math.round(
+          evt.loaded / evt.total * 100
+        );
+
+        document.getElementById('prg').textContent =
+          '上傳進度：' + percent + '%';
+      }
+    });
+
+    xhr.onload = function() {
+      if (xhr.status === 200 && xhr.responseText.trim() === 'OK') {
+        document.getElementById('prg').textContent =
+          '更新成功，ESP32 正在重新啟動...';
+      } else {
+        document.getElementById('prg').textContent =
+          '更新失敗：' + xhr.responseText;
+      }
+    };
+
+    xhr.onerror = function() {
+      document.getElementById('prg').textContent =
+        '連線中斷，請確認 ESP32 狀態';
+    };
+
+    document.getElementById('prg').textContent =
+      '準備上傳...';
+
+    xhr.send(data);
+  }
+);
+</script>
+
+</body>
+</html>
+)rawliteral";
+
+// ================================
+// GitHub 版本檢查函式
+// ================================
+void checkGitHubVersion() {
+
+  // 避免網路錯誤時每一圈 loop 都重新連線
+  lastVersionCheck = millis();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    versionStatus = "Wi-Fi 未連線，無法檢查";
+    Serial.println(versionStatus);
+    return;
+  }
+
+  WiFiClientSecure client;
+
+  // 測試用：略過 HTTPS 憑證驗證
+  // 正式使用建議設定 CA 憑證
+  client.setInsecure();
+
+  HTTPClient https;
+  https.setTimeout(8000);
+
+  Serial.println();
+  Serial.println("正在檢查 GitHub 版本...");
+
+  if (!https.begin(client, versionURL)) {
+    versionStatus = "無法連接 GitHub";
+    Serial.println(versionStatus);
+    return;
+  }
+
+  // 避免取得快取的舊版本資料
+  https.addHeader("Cache-Control", "no-cache");
+
+  int httpCode = https.GET();
+
+  if (httpCode == HTTP_CODE_OK) {
+
+    String version = https.getString();
+    version.trim();
+
+    // 基本格式檢查
+    bool valid = version.length() > 0 &&
+                 version.length() <= 30;
+
+    for (unsigned int i = 0; i < version.length(); i++) {
+      char c = version.charAt(i);
+
+      if (!((c >= '0' && c <= '9') ||
+            c == '.')) {
+        valid = false;
+        break;
+      }
+    }
+
+    if (valid) {
+      latestVersion = version;
+
+      if (latestVersion == currentVersion) {
+        versionStatus = "✅ 目前已是最新版本";
+      } else {
+        versionStatus = "🆕 發現不同版本，請確認是否需要更新";
+      }
+
+      Serial.println("目前版本：" +
+                     String(currentVersion));
+
+      Serial.println("GitHub 最新版本：" +
+                     latestVersion);
+
+      Serial.println("版本狀態：" +
+                     versionStatus);
+
+    } else {
+      versionStatus = "版本檔案格式錯誤";
+      Serial.println(versionStatus);
+    }
+
+  } else {
+    versionStatus = "GitHub 檢查失敗，HTTP：" +
+                    String(httpCode);
+
+    Serial.println(versionStatus);
+  }
+
+  https.end();
+}
+
+// ================================
+// Setup
+// ================================
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  Serial.println();
+  Serial.println("================================");
+  Serial.println("ESP32 韌體管理系統");
+  Serial.println("目前版本：" + String(currentVersion));
+  Serial.println("================================");
+
+  // 連線 Wi-Fi
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  Serial.print("正在連接 Wi-Fi");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+
+  }
+
+  Serial.println();
+  Serial.println("Wi-Fi 連線成功！");
+  Serial.print("IP 位址：http://");
+  Serial.println(WiFi.localIP());
+
+  // 設定 mDNS
+  if (MDNS.begin(host)) {
+    Serial.println("mDNS 已啟動");
+    Serial.println("網址：http://esp32.local");
+  } else {
+    Serial.println("mDNS 啟動失敗，可使用 IP 位址連線");
+  }
+
+  // 開機自動檢查 GitHub 版本
+  checkGitHubVersion();
+
+  // 首頁：登入
+  server.on("/", HTTP_GET, []() {
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "text/html; charset=UTF-8",
+                loginIndex);
+  });
+
+  // OTA 管理頁面
+  server.on("/serverIndex", HTTP_GET, []() {
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "text/html; charset=UTF-8",
+                serverIndex);
+  });
+
+  // 提供目前版本資訊
+  server.on("/version", HTTP_GET, []() {
+    String json = "{";
+    json += "\"current\":\"" +
+            String(currentVersion) + "\",";
+    json += "\"latest\":\"" +
+            latestVersion + "\",";
+    json += "\"status\":\"" +
+            versionStatus + "\"";
+    json += "}";
+
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "application/json; charset=UTF-8",
+                json);
+  });
+
+  // 手動檢查 GitHub 版本
+  server.on("/checkVersion", HTTP_GET, []() {
+    checkGitHubVersion();
+
+    server.send(200, "text/plain; charset=UTF-8",
+                versionStatus);
+  });
+
+  // OTA 更新結果
+  server.on("/update", HTTP_POST, []() {
+
+    server.sendHeader("Connection", "close");
+
+    if (Update.hasError()) {
+      server.send(500, "text/plain", "FAIL");
+    } else {
+      server.send(200, "text/plain", "OK");
+      delay(500);
+      ESP.restart();
+    }
+
+  }, []() {
+
+    HTTPUpload& upload = server.upload();
+
+    if (upload.status == UPLOAD_FILE_START) {
+
+      Serial.printf("開始更新：%s\n",
+                    upload.filename.c_str());
+
+      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+        Update.printError(Serial);
+      }
+
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+
+      size_t written = Update.write(
+        upload.buf,
+        upload.currentSize
+      );
+
+      if (written != upload.currentSize) {
+        Update.printError(Serial);
+      }
+
+    } else if (upload.status == UPLOAD_FILE_END) {
+
+      if (Update.end(true)) {
+        Serial.printf(
+          "更新成功：%u bytes\n",
+          upload.totalSize
+        );
+        Serial.println("準備重新啟動...");
+      } else {
+        Update.printError(Serial);
+      }
+
+    } else if (upload.status == UPLOAD_FILE_ABORTED) {
+
+      Update.abort();
+      Serial.println("更新已中止");
+    }
+  });
+
+  // 啟動伺服器
+  server.begin();
+
+  Serial.println("Web Server 已啟動");
+  Serial.println("版本：" + String(currentVersion));
+  Serial.println("================================");
+}
+
+// ================================
+// Loop
+// ================================
+void loop() {
+
+  server.handleClient();
+
+  // 定時檢查 GitHub 最新版本
+  if (millis() - lastVersionCheck >=
+      versionCheckInterval) {
+
+    checkGitHubVersion();
+  }
+
+  delay(2);
+}
